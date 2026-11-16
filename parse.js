@@ -421,23 +421,43 @@ function expandTabs(line, indent) {
   return out;
 }
 
+// Expand tabs in a line's leading whitespace only. Returns the line itself
+// when its leading whitespace holds no tab (the common case), so the caller
+// avoids a replace that would allocate an identical string.
+function expandLeadingTabs(line) {
+  let i = 0;
+  let hasTab = false;
+  while (i < line.length && (line[i] === ' ' || line[i] === '\t')) {
+    if (line[i] === '\t') hasTab = true;
+    i++;
+  }
+  if (!hasTab) return line;
+  return line.replace(O.leadingSpaceTab, (ws) => expandTabs(ws));
+}
+
 // Last `*`/`_`/`~` runs that can close emphasis/strong/del, scanned once per
-// inline pass and shared by every opener in it.
+// inline pass and shared by every opener in it. Jumps between delimiters
+// with indexOf instead of visiting every character.
 function scanClosers(src) {
   const last = { '*': -1, _: -1 };
   let lastDel = -1;
   const len = src.length;
-  for (let i = 0; i < len; i++) {
-    const ch = src[i];
-    if (ch !== '*' && ch !== '_' && ch !== '~') continue;
-    const prev = i === 0 ? '\n' : src[i - 1];
-    let j = i + 1;
+  let i = 0;
+  while (i < len) {
+    let next = len;
+    let idx = src.indexOf('*', i); if (idx !== -1 && idx < next) next = idx;
+    idx = src.indexOf('_', i); if (idx !== -1 && idx < next) next = idx;
+    idx = src.indexOf('~', i); if (idx !== -1 && idx < next) next = idx;
+    if (next >= len) break;
+    const ch = src[next];
+    const prev = next === 0 ? '\n' : src[next - 1];
+    let j = next + 1;
     while (j < len && src[j] === ch) j++;
     if (prev !== ' ' && prev !== '\t' && prev !== '\n' && prev !== '\r' && prev !== '\f') {
-      if (ch === '~') lastDel = i;
-      else last[ch] = i;
+      if (ch === '~') lastDel = next;
+      else last[ch] = next;
     }
-    i = j - 1;
+    i = j;
   }
   return { last, lastDel };
 }
@@ -451,6 +471,20 @@ function cpLen(s) {
     n++;
   }
   return n;
+}
+
+// Leading-whitespace width of a line, counting a tab as 4 spaces: the
+// same count as line.replace(/\t/g, '    ').search(/[^ ]/), but without
+// allocating a new string. Returns -1 when the line is all whitespace.
+function leadingSpaceFlat(line) {
+  let n = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === ' ') n++;
+    else if (ch === '\t') n += 4;
+    else return n;
+  }
+  return -1;
 }
 
 // First non-space character within the first `indent` spaces of a line, or
@@ -1247,7 +1281,7 @@ Lx.prototype.list = function (src) {
         nextLine = rawLine;
         const c0 = nextLine[0];
         const nextLineWithoutTabs = (c0 === ' ' || c0 === '\t')
-          ? nextLine.replace(O.leadingSpaceTab, (ws) => expandTabs(ws))
+          ? expandLeadingTabs(nextLine)
           : nextLine;
         const sig = lineSig(nextLine, indent);
         let hit = false;
@@ -1266,7 +1300,7 @@ Lx.prototype.list = function (src) {
           contents.push(nextLineWithoutTabs.slice(indent));
         } else {
           if (blankLine) break;
-          if (line.replace(O.tabCharGlobal, '    ').search(O.nonSpaceChar) >= 4) break;
+          if (leadingSpaceFlat(line) >= 4) break;
           const lsig = lineSig(line, indent);
           let lhit = false;
           if (lsig === '`' || lsig === '~') lhit = fencesBeginRegex.test(line);
@@ -1553,7 +1587,9 @@ Lx.prototype.blockTokens = function (src, tokens, lastParagraphClipped) {
 };
 
 Lx.prototype.lex = function (src) {
-  src = src.replace(O.carriageReturn, '\n');
+  // Normalise carriage returns, but only when one is present: the regex
+  // replace scans the whole input, and most documents have no '\r' at all.
+  if (src.indexOf('\r') !== -1) src = src.replace(O.carriageReturn, '\n');
   const tokens = [];
   this.blockTokens(src, tokens);
   for (let i = 0; i < this.inlineQueue.length; i++) {
